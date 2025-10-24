@@ -1,66 +1,31 @@
-const WebSocket = require("ws");
+const express = require("express");
+const { Server } = require("socket.io");
+const bodyParser = require("body-parser");
 
-const wss = new WebSocket.Server({ port: 3001 });
-const rooms = new Map();
+const io = new Server({
+  cors: true,
+});
+const app = new express();
 
-wss.on("connection", (socket) => {
-  socket.on("message", (data) => {
-    let message;
-    try {
-      message = JSON.parse(data);
-    } catch (err) {
-      console.error("❌ Invalid message:", data);
-      return;
-    }
+app.use(bodyParser.json());
 
-    const { type, roomId, payload } = message;
+const emailToSocketMap = new Map();
 
-    if (type === "join") {
-      if (!rooms.has(roomId)) {
-        rooms.set(roomId, []);
-      }
-
-      const clients = rooms.get(roomId);
-
-      if (!clients.includes(socket)) {
-        if (clients.length >= 2) {
-          socket.send(
-            JSON.stringify({ type: "error", payload: "Room is full" })
-          );
-          return;
-        }
-        clients.push(socket);
-        socket.roomId = roomId;
-      }
-
-      return;
-    }
-
-    // Forward only valid signaling messages
-    const allowedTypes = ["offer", "answer", "ice-candidate", "peer-left"];
-    if (!allowedTypes.includes(type)) return;
-
-    const clients = rooms.get(roomId) || [];
-    clients.forEach((client) => {
-      if (client !== socket && client.readyState === WebSocket.OPEN) {
-        client.send(JSON.stringify({ type, payload }));
-      }
-    });
-  });
-
-  socket.on("close", () => {
-    const roomId = socket.roomId;
-    if (roomId && rooms.has(roomId)) {
-      const clients = rooms.get(roomId);
-      const index = clients.indexOf(socket);
-      if (index !== -1) {
-        clients.splice(index, 1);
-        if (clients.length === 0) {
-          rooms.delete(roomId);
-        }
-      }
-    }
+io.on("connection", (socket) => {
+  console.log("New Connection");
+  socket.on("join-room", (data) => {
+    const { roomId, emailId } = data;
+    console.log("User", emailId, "Joined room", roomId);
+    emailToSocketMap.set(emailId, socket.id);
+    socket.join(roomId);
+    socket.emit("joined-room", { roomId });
+    socket.broadcast.to(roomId).emit("user-joined", { emailId });
   });
 });
 
-console.log("✅ WebSocket signaling server running on ws://localhost:3001");
+app.listen(8000, () => {
+  console.log("App server running at 8000");
+});
+io.listen(8001, () => {
+  console.log("socket server running at 80001");
+});
