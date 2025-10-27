@@ -2,95 +2,92 @@ const express = require("express");
 const { Server } = require("socket.io");
 const bodyParser = require("body-parser");
 const http = require("http");
+
 const app = express();
 app.use(bodyParser.json());
 const server = http.createServer(app);
-const io = new Server(server, {
-  cors: { origin: "*" },
-});
+const io = new Server(server, { cors: { origin: "*" } });
 
-// Maps for user lookup
 const emailToSocketMap = new Map();
 const socketToEmailMap = new Map();
 const messageQueue = new Map();
+const readyUsers = new Set(); // Track who's ready
 
 io.on("connection", (socket) => {
-  console.log("🔌 Socket connected:", socket.id);
+  console.log("Socket connected:", socket.id);
 
-  // User joins a room
   socket.on("join-room", (data) => {
     const { roomId, emailId } = data;
+
     emailToSocketMap.set(emailId, socket.id);
     socketToEmailMap.set(socket.id, emailId);
 
-    // Ensure a queue exists for this user
-    if (!messageQueue.has(emailId)) messageQueue.set(emailId, []);
-
-    console.log(
-      "🧭 Current emailToSocketMap:",
-      Array.from(emailToSocketMap.entries())
-    );
+    // Initialize queue for this user
+    if (!messageQueue.has(emailId)) {
+      messageQueue.set(emailId, []);
+    }
 
     socket.join(roomId);
     socket.emit("joined-room", { roomId });
     socket.broadcast.to(roomId).emit("user-joined", { emailId });
   });
 
-  // NEW: Client signals they're ready to receive queued messages
   socket.on("ready-to-receive", () => {
     const emailId = socketToEmailMap.get(socket.id);
     if (!emailId) return;
 
-    const queuedMessages = messageQueue.get(emailId);
-    if (queuedMessages && queuedMessages.length > 0) {
+    // Mark as ready
+    readyUsers.add(emailId);
+
+    // Deliver all queued messages
+    const queuedMessages = messageQueue.get(emailId) || [];
+    if (queuedMessages.length > 0) {
       console.log(
-        `📬 Delivering ${queuedMessages.length} queued messages to ${emailId}`
+        `Delivering ${queuedMessages.length} queued messages to ${emailId}`
       );
       queuedMessages.forEach((msg) => {
         socket.emit(msg.event, msg.data);
       });
-      messageQueue.set(emailId, []);
+      messageQueue.set(emailId, []); // Clear queue
     }
   });
 
   socket.on("call-user", (data) => {
     const { emailId, offer } = data;
     const fromEmail = socketToEmailMap.get(socket.id);
-    const socketId = emailToSocketMap.get(emailId);
+    const targetSocketId = emailToSocketMap.get(emailId);
 
-    console.log(
-      "☎️ fromEmail:",
-      fromEmail,
-      "| to:",
-      emailId,
-      "| socketId:",
-      socketId
-    );
+    console.log("Call from:", fromEmail, "to:", emailId);
 
-    if (!socketId) {
-      console.log("⚠️ Target not ready, queuing message for", emailId);
+    if (!targetSocketId || !readyUsers.has(emailId)) {
+      // Queue it - either socket doesn't exist or user not ready
+      console.log("Queueing message for", emailId);
       const queue = messageQueue.get(emailId) || [];
       queue.push({ event: "incoming-call", data: { from: fromEmail, offer } });
       messageQueue.set(emailId, queue);
       return;
     }
 
-    socket.to(socketId).emit("incoming-call", { from: fromEmail, offer });
+    io.to(targetSocketId).emit("incoming-call", { from: fromEmail, offer });
   });
 
-  // Clean up on disconnect
+  socket.on("call-accepted", (data) => {
+    const { emailId, ans } = data;
+    const socketId = emailToSocketMap.get(emailId);
+    socket.to(socketId).emit("call-accepted", { ans });
+  });
+
   socket.on("disconnect", () => {
     const emailId = socketToEmailMap.get(socket.id);
     if (emailId) {
       emailToSocketMap.delete(emailId);
       socketToEmailMap.delete(socket.id);
-      // Optionally clear queue
+      readyUsers.delete(emailId);
       messageQueue.delete(emailId);
     }
-    console.log("🔌 Socket disconnected:", socket.id);
   });
 });
 
 server.listen(8000, () => {
-  console.log("App + Socket server running on 8000");
+  console.log("Signaling server running on 8000");
 });
